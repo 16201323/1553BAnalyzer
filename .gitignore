@@ -1,0 +1,75 @@
+# Qt Creator
+*.pro.user
+*.qmlc
+*.jsc
+
+# Build directories
+build/
+bin/
+obj/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.pdb
+*.ilk
+
+# Makefiles
+Makefile*
+*.mk
+
+# Qt generated files
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeLists.txt.user
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# MinGW
+mingw*/
+
+# Debug files
+*.log
+*.dump
+*.heap
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Test data (large files)
+data/*.bin
+data/*.raw
+data/*.data
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
