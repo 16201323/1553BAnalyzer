@@ -49,7 +49,8 @@ struct TimeIntervalAnalysis {
     double maxIntervalMs;                   ///< 最大时间间隔（毫秒）
     double stdDevMs;                        ///< 标准差（毫秒）
     double jitterPercent;                   ///< 抖动百分比（标准差/平均值*100%）
-    QVector<double> timestamps;             ///< 时间戳序列（毫秒）
+    QVector<double> timestamps;             ///< 时间戳序列（毫秒，从数据起始计算的相对时间）
+    QVector<quint32> rawTimestamps;         ///< 原始时间戳序列（SMbiMonPacketData.timestamp，单位40微秒）
     QVector<double> intervals;              ///< 时间间隔序列（毫秒）
     bool isStable;                          ///< 是否稳定（抖动<10%）
     QString stabilityAssessment;            ///< 稳定性评估描述

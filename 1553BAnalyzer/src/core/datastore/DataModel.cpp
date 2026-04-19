@@ -16,6 +16,7 @@
 #include "core/parser/PacketStruct.h"
 #include <QDateTime>
 #include <QColor>
+#include <QFont>
 #include <cstring>
 
 /**
@@ -239,42 +240,100 @@ QVariant DataModel::data(const QModelIndex& index, int role) const
  * @brief 获取表头数据
  * @param section 节（列号）
  * @param orientation 方向（仅处理水平方向）
- * @param role 数据角色（仅处理显示角色）
- * @return 表头文本
+ * @param role 数据角色（DisplayRole、FontRole、ForegroundRole、ToolTipRole）
+ * @return 表头文本或格式信息
+ * 
+ * 支持的角色：
+ * - DisplayRole: 表头文本，有筛选条件的列显示"列名 🔍"
+ * - FontRole: 有筛选条件的列使用加粗字体
+ * - ForegroundRole: 有筛选条件的列使用蓝色文字
+ * - ToolTipRole: 有筛选条件的列显示筛选表达式
  */
 QVariant DataModel::headerData(int section, Qt::Orientation orientation, int role) const
 {
-    // 仅处理水平表头的显示角色
-    if (orientation != Qt::Horizontal || role != Qt::DisplayRole) {
+    if (orientation != Qt::Horizontal) {
         return QVariant();
     }
     
-    // 根据列号返回对应的表头文本
+    /* 获取列名文本 */
+    QString headerText;
     switch (section) {
     case ColRowIndex:
-        return tr(u8"序号");
+        headerText = tr(u8"序号");
+        break;
     case ColMpuId:
-        return tr(u8"任务机");
+        headerText = tr(u8"任务机");
+        break;
     case ColPacketLen:
-        return tr(u8"包长度");
+        headerText = tr(u8"包长度");
+        break;
     case ColDate:
-        return tr(u8"日期");
+        headerText = tr(u8"日期");
+        break;
     case ColTimestamp:
-        return tr(u8"时间戳");
+        headerText = tr(u8"时间戳");
+        break;
     case ColMessageType:
-        return tr(u8"消息类型");
+        headerText = tr(u8"消息类型");
+        break;
     case ColTerminalAddr:
-        return tr(u8"终端地址");
+        headerText = tr(u8"终端地址");
+        break;
     case ColSubAddr:
-        return tr(u8"子地址");
+        headerText = tr(u8"子地址");
+        break;
     case ColTR:
-        return tr(u8"收发");
+        headerText = tr(u8"收发");
+        break;
     case ColDataCount:
-        return tr(u8"数据计数");
+        headerText = tr(u8"数据计数");
+        break;
     case ColStatus:
-        return tr(u8"状态");
+        headerText = tr(u8"状态");
+        break;
     case ColDataHex:
-        return tr(u8"数据(HEX)");
+        headerText = tr(u8"数据(HEX)");
+        break;
+    default:
+        return QVariant();
+    }
+    
+    /* 检查该列是否有算式筛选条件 */
+    bool hasFilter = m_dataStore && m_dataStore->hasColumnExpressionFilters() &&
+                     !m_dataStore->getColumnExpressionFilter(section).isEmpty();
+    
+    switch (role) {
+    case Qt::DisplayRole:
+        /* 有筛选条件的列在列名后添加筛选图标 */
+        if (hasFilter) {
+            return headerText + u8" 🔍";
+        }
+        return headerText;
+        
+    case Qt::FontRole:
+        /* 有筛选条件的列使用加粗字体 */
+        if (hasFilter) {
+            QFont font;
+            font.setBold(true);
+            return font;
+        }
+        return QVariant();
+        
+    case Qt::ForegroundRole:
+        /* 有筛选条件的列使用蓝色文字，醒目提示 */
+        if (hasFilter) {
+            return QColor(0, 100, 200);
+        }
+        return QVariant();
+        
+    case Qt::ToolTipRole:
+        /* 有筛选条件的列在工具提示中显示筛选表达式 */
+        if (hasFilter) {
+            QString expr = m_dataStore->getColumnExpressionFilter(section);
+            return tr(u8"筛选条件: %1").arg(expr);
+        }
+        return QVariant();
+        
     default:
         return QVariant();
     }

@@ -30,6 +30,7 @@
 #include "core/config/ConfigManager.h"
 #include "core/parser/PacketStruct.h"
 #include "core/datastore/DataStore.h"
+#include "core/datastore/FilterExpression.h"
 #include "core/datastore/DatabaseManager.h"
 #include "utils/Logger.h"
 #include "utils/Qt5Compat.h"
@@ -48,6 +49,7 @@
 #include <QUrl>
 #include <QFileInfo>
 #include <QThread>
+#include <QTimer>
 #include <QThreadPool>
 #include <QTreeWidget>
 #include <QDialogButtonBox>
@@ -100,6 +102,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_parseTimer(new QTimer(this))
     , m_reportProgressDialog(nullptr)
     , m_progressDialog(nullptr)
+    , m_filterPollTimer(nullptr)
     , m_loadingDialog(nullptr)
     , m_paginationWidget(nullptr)
     , m_loadCanceled(false)
@@ -331,9 +334,16 @@ void MainWindow::setupConnections()
     connect(m_dataModel, &DataModel::dataLoaded, this, &MainWindow::onDataLoaded);
     connect(m_parseTimer, &QTimer::timeout, this, &MainWindow::onParseTimerTimeout);
     
-    // 连接DataStore的分页和筛选进度信号
-    connect(m_dataStore, &DataStore::filterProgress, this, &MainWindow::onFilterProgress);
+    /* 连接DataStore的筛选完成和分页变化信号 */
+    connect(m_dataStore, &DataStore::filterChanged, this, &MainWindow::onDataStoreFilterChanged);
     connect(m_dataStore, &DataStore::pageChanged, this, &MainWindow::onPageChanged);
+    
+    /* 创建筛选进度轮询定时器（主线程定时器，每200ms轮询一次DataStore的原子进度变量）
+     * 使用轮询方式替代跨线程信号，因为Qt 5.9.9的QTimer::singleShot从后台线程
+     * 调用时存在线程安全问题，可能导致进度信号无法正确传递到主线程 */
+    m_filterPollTimer = new QTimer(this);
+    m_filterPollTimer->setInterval(200);
+    connect(m_filterPollTimer, &QTimer::timeout, this, &MainWindow::onFilterProgressPoll);
     
     // 连接分页控件信号
     connect(m_paginationWidget, &PaginationWidget::pageChanged, m_dataStore, &DataStore::setCurrentPage);
@@ -474,6 +484,7 @@ void MainWindow::setupConnections()
     connect(m_tableView, &TableView::recordDoubleClicked, this, &MainWindow::onRecordDoubleClicked);
     connect(m_tableView, &TableView::showDetailRequested, this, &MainWindow::showDataDetailDialog);
     connect(m_tableView, &TableView::expressionFilterRequested, this, &MainWindow::onExpressionFilterRequested);
+    connect(m_tableView, &TableView::columnFilterCleared, this, &MainWindow::onColumnFilterCleared);
     
     connect(m_toolExecutor, &AIToolExecutor::queryDataRequested, this, &MainWindow::onAIQueryDataRequested);
     connect(m_toolExecutor, &AIToolExecutor::generateChartRequested, this, &MainWindow::onAIGenerateChartRequested);
@@ -948,14 +959,31 @@ void MainWindow::onSettings()
 void MainWindow::onAbout()
 {
     QMessageBox::about(this, tr(u8"关于"),
-        tr(u8"1553B数据智能分析工具\n\n"
-           u8"版本: 1.0.0\n\n"
-           u8"功能:\n"
-           u8"- 二进制文件解析\n"
-           u8"- 数据表格展示\n"
-           u8"- 甘特图可视化\n"
-           u8"- AI智能分析\n"
-           u8"- 多格式导出"));
+        tr(u8"<h3>1553B数据智能分析工具</h3>"
+           u8"<p>版本: 1.2.0</p>"
+           u8"<hr>"
+           u8"<p><b>核心功能:</b></p>"
+           u8"<ul>"
+           u8"<li>二进制文件解析（1553B总线数据）</li>"
+           u8"<li>数据表格展示（分页、排序、筛选）</li>"
+           u8"<li>甘特图可视化（时序数据流）</li>"
+           u8"<li>统计图表（饼图、柱状图、折线图、周期间隔折线图）</li>"
+           u8"<li>AI智能分析（自然语言查询）</li>"
+           u8"<li>语音识别（VOSK离线引擎）</li>"
+           u8"<li>多格式导出（CSV、HTML、Word）</li>"
+           u8"</ul>"
+           u8"<p><b>v1.2 新增功能:</b></p>"
+           u8"<ul>"
+           u8"<li>周期间隔折线图（独立图表类型，数据点标注数值）</li>"
+           u8"<li>周期间隔分析CSV导出（含序号、RT、子地址、数据包时间、间隔时间）</li>"
+           u8"<li>筛选列名特殊显示（加粗蓝色+筛选图标，悬停显示算式）</li>"
+           u8"<li>筛选弹框记忆上次输入的算式</li>"
+           u8"<li>筛选过程显示进度条（异步筛选，不阻塞UI）</li>"
+           u8"<li>修复饼图图例文字截断问题</li>"
+           u8"<li>修复AI分析模式响应多余空行问题</li>"
+           u8"</ul>"
+           u8"<hr>"
+           u8"<p>开发团队: </p>"));
 }
 
 void MainWindow::onOpenLog()
@@ -1412,22 +1440,89 @@ void MainWindow::onRecordDoubleClicked(int row)
  * @param column 列索引
  * @param expression 筛选表达式
  * 
- * 根据用户输入的算式进行数据筛选
+ * 根据用户输入的算式进行数据筛选。
+ * 内存模式下使用异步筛选并显示进度对话框，支持大数据量筛选时的进度反馈。
+ * 数据库模式下使用同步筛选（数据库查询本身很快）。
  */
 void MainWindow::onExpressionFilterRequested(int column, const QString& expression)
 {
-    // 设置列算式筛选
-    if (m_dataStore->setColumnExpressionFilter(column, expression)) {
-        m_dataModel->setDataStore(m_dataStore);
-        
-        QString columnName = m_dataModel->headerData(column, Qt::Horizontal).toString();
-        m_statusLabel->setText(tr(u8"已应用筛选: %1 %2").arg(columnName).arg(expression));
-        LOG_INFO("MainWindow", QString::fromUtf8(u8"应用算式筛选: 列=%1, 表达式=%2").arg(column).arg(expression));
-    } else {
+    /* 先验证表达式是否有效 */
+    FilterExpression filter(expression);
+    if (!filter.isValid()) {
         QMessageBox::warning(this, tr(u8"筛选错误"), 
             tr(u8"筛选表达式无效: %1\n\n请检查表达式格式。").arg(expression));
         LOG_WARNING("MainWindow", QString::fromUtf8(u8"无效的筛选表达式: %1").arg(expression));
+        return;
     }
+    
+    /* 使用批量更新模式，阻止setColumnExpressionFilter内部自动调用applyFilters() */
+    m_dataStore->beginBatchFilterUpdate();
+    m_dataStore->setColumnExpressionFilter(column, expression);
+    
+    /* 创建并显示进度对话框 */
+    if (!m_progressDialog) {
+        m_progressDialog = new ProgressDialog(this);
+        connect(m_progressDialog, &ProgressDialog::canceled, this, &MainWindow::onProgressDialogCanceled);
+    }
+    QString columnName = m_dataModel->headerData(column, Qt::Horizontal).toString();
+    m_progressDialog->setWindowTitle(tr(u8"正在筛选数据"));
+    m_progressDialog->setStatusText(tr(u8"正在应用筛选: %1 %2 ...").arg(columnName).arg(expression));
+    m_progressDialog->setProgress(0);
+    m_progressDialog->startTimer();
+    m_progressDialog->show();
+    
+    /* 启动进度轮询定时器，通过主线程定时器轮询DataStore的原子进度变量 */
+    m_filterPollTimer->start();
+    
+    /* 强制处理事件队列，确保进度对话框完成渲染后再开始筛选 */
+    QApplication::processEvents();
+    
+    /* 使用QTimer延迟执行筛选，确保进度对话框完全显示后再开始耗时操作 */
+    QTimer::singleShot(0, this, [this]() {
+        m_dataStore->applyFiltersAsync();
+    });
+    
+    m_statusLabel->setText(tr(u8"已应用筛选: %1 %2").arg(columnName).arg(expression));
+    LOG_INFO("MainWindow", QString::fromUtf8(u8"应用算式筛选: 列=%1, 表达式=%2").arg(column).arg(expression));
+}
+
+/**
+ * @brief 列筛选清除槽
+ * @param column 列索引
+ * 
+ * 清除指定列的算式筛选条件，并显示进度对话框
+ */
+void MainWindow::onColumnFilterCleared(int column)
+{
+    /* 使用批量更新模式，阻止clearColumnExpressionFilter内部自动调用applyFilters() */
+    m_dataStore->beginBatchFilterUpdate();
+    m_dataStore->clearColumnExpressionFilter(column);
+    
+    /* 创建并显示进度对话框 */
+    if (!m_progressDialog) {
+        m_progressDialog = new ProgressDialog(this);
+        connect(m_progressDialog, &ProgressDialog::canceled, this, &MainWindow::onProgressDialogCanceled);
+    }
+    QString columnName = m_dataModel->headerData(column, Qt::Horizontal).toString();
+    m_progressDialog->setWindowTitle(tr(u8"正在清除筛选"));
+    m_progressDialog->setStatusText(tr(u8"正在清除筛选: %1 ...").arg(columnName));
+    m_progressDialog->setProgress(0);
+    m_progressDialog->startTimer();
+    m_progressDialog->show();
+    
+    /* 启动进度轮询定时器，通过主线程定时器轮询DataStore的原子进度变量 */
+    m_filterPollTimer->start();
+    
+    /* 强制处理事件队列，确保进度对话框完成渲染后再开始筛选 */
+    QApplication::processEvents();
+    
+    /* 使用QTimer延迟执行筛选，确保进度对话框完全显示后再开始耗时操作 */
+    QTimer::singleShot(0, this, [this]() {
+        m_dataStore->applyFiltersAsync();
+    });
+    
+    m_statusLabel->setText(tr(u8"已清除筛选: %1").arg(columnName));
+    LOG_INFO("MainWindow", QString::fromUtf8(u8"清除列算式筛选: 列=%1").arg(column));
 }
 
 QString MainWindow::processSimpleQuery(const QString& query)
@@ -1641,6 +1736,17 @@ void MainWindow::onAITimeIntervalAnalysisRequested(const TimeIntervalAnalysis& a
     m_loadingDialog->setText(tr(u8"正在生成时间间隔分析图表..."));
     m_loadingDialog->show();
     QCoreApplication::processEvents();
+
+    /* 使用与时间间隔分析相同的过滤条件筛选数据表格 */
+    /* 先清除之前的过滤条件，再设置新的终端地址和子地址过滤 */
+    m_dataStore->clearTerminalFilter();
+    m_dataStore->clearSubAddressFilter();
+    QSet<int> terminalSet;
+    terminalSet.insert(analysis.terminalAddress);
+    m_dataStore->setTerminalFilter(terminalSet);
+    QSet<int> subAddrSet;
+    subAddrSet.insert(analysis.subAddress);
+    m_dataStore->setSubAddressFilter(subAddrSet);
 
     /* 设置图表数据源并绘制时间间隔折线图 */
     m_chartWidget->setDataStore(m_dataStore);
@@ -2404,6 +2510,60 @@ void MainWindow::onFilterProgress(int percent, int processed, int total)
 }
 
 /**
+ * @brief 筛选进度轮询槽
+ * 
+ * 由主线程定时器每200ms触发一次，轮询DataStore的原子进度变量并更新进度对话框。
+ * 使用轮询方式替代跨线程信号传递，确保在Qt 5.9.9下进度更新可靠。
+ * 当筛选完成（filterActive变为false）时自动停止轮询定时器。
+ */
+void MainWindow::onFilterProgressPoll()
+{
+    if (!m_dataStore || !m_progressDialog) {
+        m_filterPollTimer->stop();
+        return;
+    }
+    
+    /* 从DataStore的原子变量读取进度信息（线程安全，无需加锁） */
+    int percent = m_dataStore->filterProgressPercent();
+    int processed = m_dataStore->filterProgressProcessed();
+    int total = m_dataStore->filterProgressTotal();
+    bool active = m_dataStore->isFilterActive();
+    
+    /* 更新进度对话框 */
+    m_progressDialog->setProgress(percent);
+    m_progressDialog->setStatusText(tr(u8"正在筛选... %1/%2 (%3%)")
+        .arg(processed)
+        .arg(total)
+        .arg(percent));
+    
+    /* 筛选完成（原子变量标记为非活跃），停止轮询定时器 */
+    if (!active) {
+        m_filterPollTimer->stop();
+    }
+}
+
+/**
+ * @brief DataStore筛选条件变化槽
+ * 
+ * 当DataStore完成筛选操作后关闭进度对话框。
+ * 无论是同步筛选还是异步筛选完成，都会触发此槽。
+ */
+void MainWindow::onDataStoreFilterChanged()
+{
+    /* 停止进度轮询定时器（筛选已完成） */
+    if (m_filterPollTimer && m_filterPollTimer->isActive()) {
+        m_filterPollTimer->stop();
+    }
+    
+    if (m_progressDialog && m_progressDialog->isVisible()) {
+        m_progressDialog->setProgress(100);
+        m_progressDialog->stopTimer();
+        m_progressDialog->hide();
+        m_progressDialog->reset();
+    }
+}
+
+/**
  * @brief 分页变化槽
  * @param currentPage 当前页码（从0开始）
  * @param totalPages 总页数
@@ -2454,6 +2614,11 @@ void MainWindow::onPageSizeChanged(int size)
 void MainWindow::onProgressDialogCanceled()
 {
     LOG_INFO("MainWindow", QString::fromUtf8(u8"用户取消了操作"));
+    
+    /* 停止进度轮询定时器 */
+    if (m_filterPollTimer && m_filterPollTimer->isActive()) {
+        m_filterPollTimer->stop();
+    }
     
     m_loadCanceled.store(true);
     m_dataStore->cancelAsyncFilter();

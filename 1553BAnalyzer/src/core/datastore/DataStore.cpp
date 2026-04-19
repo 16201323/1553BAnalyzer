@@ -60,6 +60,10 @@ DataStore::DataStore(QObject *parent)
     , m_pageSize(100)
     , m_currentPage(0)
     , m_cancelFilter(false)
+    , m_filterProgressPercent(0)
+    , m_filterProgressProcessed(0)
+    , m_filterProgressTotal(0)
+    , m_filterActive(false)
     , m_storageMode(StorageMode::Memory)
     , m_autoSwitchThreshold(50000)
     , m_currentFileId(-1)
@@ -1910,33 +1914,135 @@ const QVector<DataRecord>& DataStore::getCurrentPageRecords() const
  */
 void DataStore::applyFiltersAsync()
 {
+    /* 重置批量更新标志，确保异步筛选能正常执行 */
+    m_batchFilterUpdate = false;
     m_cancelFilter = false;
     
-    int total = m_allRecords.size();
+    /* 初始化原子进度变量，供主线程轮询读取 */
+    m_filterProgressPercent.store(0, std::memory_order_release);
+    m_filterProgressProcessed.store(0, std::memory_order_release);
+    m_filterProgressTotal.store(0, std::memory_order_release);
+    m_filterActive.store(true, std::memory_order_release);
     
-    if (total == 0) {
-        m_filteredRecords.clear();
-        m_currentPage = 0;
-        emit filterChanged();
-        emit pageChanged(m_currentPage, totalPages(), 0);
+    /* 数据库模式且无算式筛选：纯SQL查询速度很快，直接同步执行即可 */
+    if (m_useDatabase && m_currentFileId > 0 && m_columnExpressionFilters.isEmpty()) {
+        m_filterActive.store(false, std::memory_order_release);
+        applyFilters();
         return;
     }
     
-    QVector<DataRecord> allRecordsCopy = m_allRecords;
+    /* 内存模式 或 数据库模式有算式筛选：使用异步筛选，避免阻塞UI线程 */
+    /* 在主线程中捕获筛选状态快照，确保后台线程读取的是一致的筛选条件 */
     QString sortField = m_sortField;
     Qt::SortOrder sortOrder = m_sortOrder;
     FilterSnapshot filterSnapshot = captureFilterSnapshot();
+    bool useDatabase = m_useDatabase && m_currentFileId > 0;
+    qint64 currentFileId = m_currentFileId;
     
-    QtConcurrent::run([this, total, allRecordsCopy, sortField, sortOrder, filterSnapshot]() {
+    QtConcurrent::run([this, sortField, sortOrder, filterSnapshot, useDatabase, currentFileId]() {
+        QVector<DataRecord> recordsToFilter;
+        
+        if (useDatabase) {
+            /* 数据库模式+算式筛选：在后台线程中查询数据库并转换记录 */
+            qint64 startTime = filterSnapshot.hasTimeRange ? filterSnapshot.startTime : 0;
+            qint64 endTime = filterSnapshot.hasTimeRange ? filterSnapshot.endTime : LLONG_MAX;
+            
+            /* 第一步：从数据库查询所有符合非算式筛选条件的记录 */
+            QVector<DbDataRecord> dbRecords = DatabaseManager::instance()->queryPackets(
+                currentFileId,
+                filterSnapshot.terminalFilter,
+                filterSnapshot.subAddressFilter,
+                filterSnapshot.messageTypeFilter,
+                startTime,
+                endTime,
+                0, 0,
+                filterSnapshot.chsttFilter,
+                filterSnapshot.mpuIdFilter,
+                filterSnapshot.excludeTerminalFilter,
+                filterSnapshot.excludeMessageTypeFilter,
+                filterSnapshot.hasPacketLenFilter ? filterSnapshot.packetLenMin : -1,
+                filterSnapshot.hasPacketLenFilter ? filterSnapshot.packetLenMax : -1,
+                filterSnapshot.hasDateRangeFilter ? filterSnapshot.dateYearStart : -1,
+                filterSnapshot.hasDateRangeFilter ? filterSnapshot.dateMonthStart : -1,
+                filterSnapshot.hasDateRangeFilter ? filterSnapshot.dateDayStart : -1,
+                filterSnapshot.hasDateRangeFilter ? filterSnapshot.dateYearEnd : -1,
+                filterSnapshot.hasDateRangeFilter ? filterSnapshot.dateMonthEnd : -1,
+                filterSnapshot.hasDateRangeFilter ? filterSnapshot.dateDayEnd : -1,
+                filterSnapshot.hasStatusBitFilter ? filterSnapshot.statusBitField : -1,
+                filterSnapshot.hasStatusBitFilter ? filterSnapshot.statusBitPosition : -1,
+                filterSnapshot.hasStatusBitFilter ? (filterSnapshot.statusBitValue ? 1 : 0) : -1,
+                filterSnapshot.hasWordCountFilter ? filterSnapshot.wordCountMin : -1,
+                filterSnapshot.hasWordCountFilter ? filterSnapshot.wordCountMax : -1,
+                filterSnapshot.errorFlagFilter
+            );
+            
+            /* 第二步：将数据库记录转换为DataRecord（在后台线程中完成，避免阻塞UI） */
+            recordsToFilter.reserve(dbRecords.size());
+            for (const DbDataRecord& dbRecord : dbRecords) {
+                DataRecord record;
+                record.rowIndex = dbRecord.rowIndex;
+                record.msgIndex = dbRecord.msgIndex;
+                record.dataIndex = dbRecord.dataIndex;
+                record.messageType = dbRecord.messageType;
+                record.timestampMs = dbRecord.timestampMs;
+                
+                record.packetHeader = SMbiMonPacketHeader();
+                record.packetHeader.mpuProduceId = static_cast<quint8>(dbRecord.mpuProduceId);
+                record.packetHeader.packetLen = static_cast<quint16>(dbRecord.packetLen);
+                record.packetHeader.year = static_cast<quint16>(dbRecord.headerYear);
+                record.packetHeader.month = static_cast<quint8>(dbRecord.headerMonth);
+                record.packetHeader.day = static_cast<quint8>(dbRecord.headerDay);
+                record.packetHeader.timestamp = dbRecord.headerTimestamp;
+                
+                record.packetData.header = 0xAABB;
+                record.packetData.cmd1 = generateCmd1(dbRecord.terminalAddr, dbRecord.subAddr, dbRecord.trBit, dbRecord.wordCount);
+                record.packetData.cmd2 = generateCmd2(dbRecord.terminalAddr2, dbRecord.subAddr2, dbRecord.trBit2, dbRecord.wordCount2);
+                record.packetData.states1 = static_cast<quint16>(dbRecord.status1);
+                record.packetData.states2 = static_cast<quint16>(dbRecord.status2);
+                record.packetData.chstt = static_cast<quint16>(dbRecord.chstt);
+                record.packetData.timestamp = dbRecord.packetTimestamp;
+                record.packetData.datas = dbRecord.data;
+                
+                record.terminalAddr = static_cast<quint8>(dbRecord.terminalAddr);
+                record.subAddr = static_cast<quint8>(dbRecord.subAddr);
+                record.t_r = static_cast<quint8>(dbRecord.trBit);
+                record.dataCount = static_cast<quint8>(dbRecord.wordCount);
+                
+                recordsToFilter.append(record);
+            }
+        } else {
+            /* 内存模式：在后台线程中拷贝数据（避免大数据量拷贝阻塞UI线程） */
+            recordsToFilter = m_allRecords;
+        }
+        
+        int total = recordsToFilter.size();
+        
+        /* 更新原子进度变量：总记录数 */
+        m_filterProgressTotal.store(total, std::memory_order_release);
+        
+        if (total == 0) {
+            m_filterActive.store(false, std::memory_order_release);
+            qt5InvokeMethod(this, [this]() {
+                m_filteredRecords.clear();
+                m_currentPage = 0;
+                emit filterChanged();
+                emit pageChanged(m_currentPage, totalPages(), 0);
+            });
+            return;
+        }
+        
+        /* 第三步：在后台线程中执行筛选（支持进度反馈和取消） */
         QVector<DataRecord> filtered;
         filtered.reserve(total);
         
         int processed = 0;
-        int lastPercent = 0;
         
-        for (const DataRecord& record : allRecordsCopy) {
+        for (const DataRecord& record : recordsToFilter) {
             if (m_cancelFilter) {
-                emit filterProgress(0, 0, total);
+                /* 取消筛选时重置进度原子变量 */
+                m_filterProgressPercent.store(0, std::memory_order_release);
+                m_filterProgressProcessed.store(0, std::memory_order_release);
+                m_filterActive.store(false, std::memory_order_release);
                 return;
             }
             
@@ -1945,14 +2051,20 @@ void DataStore::applyFiltersAsync()
             }
             
             processed++;
-            int percent = static_cast<int>(processed * 100.0 / total);
             
-            if (processed % 1000 == 0 || percent != lastPercent) {
-                emit filterProgress(percent, processed, total);
-                lastPercent = percent;
+            /* 每处理1000条记录更新一次原子进度变量，主线程通过定时器轮询读取 */
+            if (processed % 1000 == 0) {
+                int percent = static_cast<int>(processed * 100.0 / total);
+                m_filterProgressPercent.store(percent, std::memory_order_release);
+                m_filterProgressProcessed.store(processed, std::memory_order_release);
             }
         }
         
+        /* 筛选循环结束，更新原子进度变量为最终值 */
+        m_filterProgressPercent.store(99, std::memory_order_release);
+        m_filterProgressProcessed.store(processed, std::memory_order_release);
+        
+        /* 第四步：排序（在后台线程中完成） */
         if (!sortField.isEmpty() && !m_cancelFilter) {
             std::sort(filtered.begin(), filtered.end(),
                 [sortField, sortOrder](const DataRecord& a, const DataRecord& b) {
@@ -1969,14 +2081,25 @@ void DataStore::applyFiltersAsync()
                 });
         }
         
-        // 返回UI线程更新结果
-        qt5InvokeMethod(this, [this, filtered]() {
+        /* 第五步：返回UI线程更新结果 */
+        qt5InvokeMethod(this, [this, filtered, useDatabase]() {
             m_filteredRecords = filtered;
             m_currentPage = 0;
             
-            updateCurrentPageCache();
+            if (useDatabase) {
+                /* 数据库模式+算式筛选：使用内存分页模式 */
+                m_filteredCountForDb = m_filteredRecords.size();
+                updateCurrentPageCacheForExpressionFilter();
+            } else {
+                updateCurrentPageCache();
+            }
             
-            emit filterProgress(100, m_allRecords.size(), m_allRecords.size());
+            /* 筛选完成，更新原子进度变量为100%并标记筛选结束 */
+            m_filterProgressPercent.store(100, std::memory_order_release);
+            m_filterProgressProcessed.store(m_filteredRecords.size(), std::memory_order_release);
+            m_filterProgressTotal.store(m_filteredRecords.size(), std::memory_order_release);
+            m_filterActive.store(false, std::memory_order_release);
+            
             emit filterChanged();
             emit pageChanged(m_currentPage, totalPages(), m_filteredRecords.size());
         });

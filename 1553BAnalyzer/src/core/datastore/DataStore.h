@@ -21,6 +21,7 @@
 #include <QHash>
 #include <QSet>
 #include <QVariant>
+#include <QElapsedTimer>
 #include <atomic>
 #include <functional>
 #include "core/parser/PacketStruct.h"
@@ -213,6 +214,12 @@ public:
      * @return 所有记录的总数（未筛选）
      */
     int totalCount() const;
+    
+    /**
+     * @brief 检查是否使用数据库后端
+     * @return true表示使用数据库模式，false表示内存模式
+     */
+    bool isUsingDatabase() const { return m_useDatabase; }
     
     /**
      * @brief 获取消息数
@@ -618,6 +625,30 @@ public:
      */
     void cancelAsyncFilter();
     
+    /**
+     * @brief 获取异步筛选进度百分比
+     * @return 进度百分比（0-100），线程安全
+     */
+    int filterProgressPercent() const { return m_filterProgressPercent.load(std::memory_order_acquire); }
+    
+    /**
+     * @brief 获取异步筛选已处理记录数
+     * @return 已处理记录数，线程安全
+     */
+    int filterProgressProcessed() const { return m_filterProgressProcessed.load(std::memory_order_acquire); }
+    
+    /**
+     * @brief 获取异步筛选总记录数
+     * @return 总记录数，线程安全
+     */
+    int filterProgressTotal() const { return m_filterProgressTotal.load(std::memory_order_acquire); }
+    
+    /**
+     * @brief 检查异步筛选是否正在进行
+     * @return true表示正在筛选，线程安全
+     */
+    bool isFilterActive() const { return m_filterActive.load(std::memory_order_acquire); }
+    
 signals:
     /**
      * @brief 数据变化信号
@@ -774,6 +805,10 @@ private:
     
     // 异步筛选相关
     std::atomic<bool> m_cancelFilter;         // 取消筛选标志
+    std::atomic<int> m_filterProgressPercent; // 异步筛选进度百分比（0-100，原子变量供主线程轮询）
+    std::atomic<int> m_filterProgressProcessed; // 异步筛选已处理记录数（原子变量供主线程轮询）
+    std::atomic<int> m_filterProgressTotal;   // 异步筛选总记录数（原子变量供主线程轮询）
+    std::atomic<bool> m_filterActive;         // 异步筛选是否正在进行中
     
     // 数据库模式相关
     StorageMode m_storageMode;                // 存储模式

@@ -48,6 +48,7 @@ ChartWidget::ChartWidget(QWidget *parent)
     , m_chartType("pie")
     , m_dataDirty(false)
     , m_refreshTimer(nullptr)
+    , m_timeIntervalMode(false)
 {
     setupUI();
     
@@ -84,9 +85,15 @@ void ChartWidget::setupUI()
     m_chartTypeCombo->addItem(tr(u8"饼图 - 消息类型分布"), 0);
     m_chartTypeCombo->addItem(tr(u8"柱状图 - 终端统计"), 1);
     m_chartTypeCombo->addItem(tr(u8"折线图 - 时间分布"), 2);
+    m_chartTypeCombo->addItem(tr(u8"周期间隔折线图"), 3);
     toolLayout->addWidget(m_chartTypeCombo);
     
     toolLayout->addStretch();
+    
+    /* 导出CSV按钮，仅在周期间隔折线图模式下可见 */
+    m_exportCsvBtn = new QPushButton(tr(u8"下载CSV"), this);
+    m_exportCsvBtn->setVisible(false);
+    toolLayout->addWidget(m_exportCsvBtn);
     
     m_exportBtn = new QPushButton(tr(u8"导出图表"), this);
     toolLayout->addWidget(m_exportBtn);
@@ -95,13 +102,12 @@ void ChartWidget::setupUI()
     
     m_chart = new QCustomPlot(this);
     m_chart->setInteractions(QCP::iRangeDrag | QCP::iRangeZoom | QCP::iSelectPlottables);
-    // 不调用setOpenGl()，避免QCustomPlot打印OpenGL未定义警告
-    // 如需启用OpenGL，需在CMakeLists.txt中添加QCUSTOMPLOT_USE_OPENGL定义
     mainLayout->addWidget(m_chart);
     
     connect(m_chartTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ChartWidget::onChartTypeChanged);
     connect(m_exportBtn, &QPushButton::clicked, this, &ChartWidget::onExportChart);
+    connect(m_exportCsvBtn, &QPushButton::clicked, this, &ChartWidget::onExportTimeIntervalCsv);
 }
 
 void ChartWidget::setDataStore(DataStore* store)
@@ -125,11 +131,19 @@ void ChartWidget::setDataStore(DataStore* store)
 void ChartWidget::setChartSubject(ChartSubject subject)
 {
     m_chartSubject = subject;
+    /* 切换统计主题时退出时间间隔分析模式 */
+    m_timeIntervalMode = false;
+    /* 隐藏CSV导出按钮 */
+    m_exportCsvBtn->setVisible(false);
 }
 
 void ChartWidget::setChartType(const QString& type)
 {
     m_chartType = type;
+    /* 切换图表类型时退出时间间隔分析模式 */
+    m_timeIntervalMode = false;
+    /* 隐藏CSV导出按钮 */
+    m_exportCsvBtn->setVisible(false);
 }
 
 void ChartWidget::scheduleRefresh()
@@ -146,10 +160,25 @@ void ChartWidget::refreshChart()
         return;
     }
     
+    /* 时间间隔分析模式下，不自动刷新图表，避免覆盖时间间隔折线图 */
+    if (m_timeIntervalMode) {
+        m_dataDirty = false;
+        return;
+    }
+    
     m_dataDirty = false;
     m_lastDrawSize = m_chart->size();
     
     QCoreApplication::processEvents();
+    
+    /* 周期间隔折线图主题，使用存储的分析结果重绘 */
+    if (m_chartSubject == ChartSubject::TimeInterval) {
+        if (m_timeIntervalAnalysis.recordCount >= 2) {
+            drawTimeIntervalChart(m_timeIntervalAnalysis);
+        }
+        emit updateFinished();
+        return;
+    }
     
     if (m_chartSubject == ChartSubject::Chstt) {
         drawChsttPieChart();
@@ -180,6 +209,12 @@ void ChartWidget::refreshChart()
     case 2:
         drawLineChart();
         break;
+    case 3:
+        /* 周期间隔折线图类型，使用存储的分析结果重绘 */
+        if (m_timeIntervalAnalysis.recordCount >= 2) {
+            drawTimeIntervalChart(m_timeIntervalAnalysis);
+        }
+        break;
     }
     
     emit updateFinished();
@@ -188,7 +223,19 @@ void ChartWidget::refreshChart()
 void ChartWidget::onChartTypeChanged(int index)
 {
     Q_UNUSED(index)
-    refreshChart();
+    int type = m_chartTypeCombo->currentData().toInt();
+    
+    /* 用户手动切换到周期间隔折线图类型时，如果有存储的分析结果则重绘 */
+    if (type == 3 && m_timeIntervalAnalysis.recordCount >= 2) {
+        m_timeIntervalMode = true;
+        m_exportCsvBtn->setVisible(true);
+        drawTimeIntervalChart(m_timeIntervalAnalysis);
+    } else {
+        /* 切换到其他图表类型时，退出时间间隔分析模式 */
+        m_timeIntervalMode = false;
+        m_exportCsvBtn->setVisible(false);
+        refreshChart();
+    }
 }
 
 void ChartWidget::onExportChart()
@@ -205,6 +252,40 @@ void ChartWidget::onExportChart()
             m_chart->savePng(filePath, 1200, 800);
         }
         QMessageBox::information(this, tr(u8"导出成功"), tr(u8"图表已保存到: %1").arg(filePath));
+    }
+}
+
+/**
+ * @brief 导出时间间隔分析结果为CSV文件
+ * 
+ * 将当前存储的时间间隔分析结果导出为CSV格式文件，
+ * 包含序号、RT、子地址、数据包时间、与上一包间隔时间等列。
+ * 文件编码为UTF-8 with BOM，确保中文正确显示。
+ */
+void ChartWidget::onExportTimeIntervalCsv()
+{
+    if (m_timeIntervalAnalysis.recordCount < 2) {
+        QMessageBox::warning(this, tr(u8"导出失败"), tr(u8"数据不足，无法导出CSV"));
+        return;
+    }
+    
+    /* 默认文件名包含RT和子地址信息 */
+    QString defaultName = QString("RT%1_SA%2_TimeInterval")
+        .arg(m_timeIntervalAnalysis.terminalAddress)
+        .arg(m_timeIntervalAnalysis.subAddress);
+    
+    QString filePath = QFileDialog::getSaveFileName(
+        this, tr(u8"导出时间间隔CSV"), defaultName,
+        tr(u8"CSV文件 (*.csv)")
+    );
+    
+    if (!filePath.isEmpty()) {
+        bool success = TimeIntervalAnalyzer::exportToCsv(m_timeIntervalAnalysis, filePath);
+        if (success) {
+            QMessageBox::information(this, tr(u8"导出成功"), tr(u8"CSV文件已保存到: %1").arg(filePath));
+        } else {
+            QMessageBox::warning(this, tr(u8"导出失败"), tr(u8"无法保存CSV文件，请检查文件路径和权限"));
+        }
     }
 }
 
@@ -305,7 +386,25 @@ void ChartWidget::drawPieChart()
     
     int margin = 20;
     int titleHeight = 40;
-    int legendWidth = 200;
+    
+    /* 先计算图例所需宽度，确保图例文字不被截断 */
+    QFont legendFontCalc("Microsoft YaHei", 10);
+    QFontMetrics fmLegendCalc(legendFontCalc);
+    int maxLegendTextWidth = 0;
+    for (int i = 0; i < values.size(); ++i) {
+        QString legendText = QString("%1: %2 (%3%)")
+            .arg(labels[i])
+            .arg(static_cast<int>(values[i]))
+            .arg(values[i] / total * 100, 0, 'f', 1);
+        maxLegendTextWidth = qMax(maxLegendTextWidth, fmLegendCalc.boundingRect(legendText).width());
+    }
+    /* 图例宽度 = 色块(16) + 间距(8) + 文字宽度 + 右侧边距(20) */
+    int legendWidth = qMax(200, 16 + 8 + maxLegendTextWidth + 20);
+    /* 确保图例不超出控件右边界 */
+    int availableWidth = chartWidth - margin * 2;
+    if (legendWidth > availableWidth * 0.45) {
+        legendWidth = static_cast<int>(availableWidth * 0.45);
+    }
     
     QFont titleFont("Microsoft YaHei", 14, QFont::Bold);
     painter.setFont(titleFont);
@@ -426,7 +525,16 @@ void ChartWidget::drawPieChart()
                              labelRect.width(), labelRect.height()),
                     Qt::AlignCenter, totalLabel);
     
+    /* 图例X坐标：饼图右侧 + 间距，但确保图例不超出控件右边界 */
     int legendX = pieX + pieDiameter + 25;
+    int legendRightEdge = legendX + legendWidth;
+    if (legendRightEdge > chartWidth - margin) {
+        /* 图例超出右边界时，向左调整图例起始位置 */
+        legendX = chartWidth - margin - legendWidth;
+        if (legendX < pieX + pieDiameter + 10) {
+            legendX = pieX + pieDiameter + 10;
+        }
+    }
     int legendY = pieY + 5;
     int legendItemHeight = 28;
     
@@ -450,7 +558,9 @@ void ChartWidget::drawPieChart()
             .arg(values[i] / total * 100, 0, 'f', 1);
         
         painter.setPen(QColor("#34495e"));
-        QRectF textRect(legendX + 24, yPos, legendWidth - 34, legendItemHeight);
+        /* 图例文字区域宽度 = 控件宽度 - 图例起始X - 色块宽度 - 间距 - 右边距 */
+        int textWidth = chartWidth - legendX - 24 - margin;
+        QRectF textRect(legendX + 24, yPos, textWidth, legendItemHeight);
         painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, legendText);
     }
     
@@ -478,6 +588,23 @@ void ChartWidget::drawPieChart()
  */
 void ChartWidget::drawTimeIntervalChart(const TimeIntervalAnalysis& analysis)
 {
+    /* 存储分析结果，用于后续CSV导出和图表重绘 */
+    m_timeIntervalAnalysis = analysis;
+    
+    /* 进入时间间隔分析模式，阻止refreshChart覆盖当前图表 */
+    m_timeIntervalMode = true;
+    
+    /* 显示CSV导出按钮 */
+    m_exportCsvBtn->setVisible(true);
+    
+    /* 切换图表类型下拉框到周期间隔折线图 */
+    int comboIndex = m_chartTypeCombo->findData(3);
+    if (comboIndex >= 0 && m_chartTypeCombo->currentIndex() != comboIndex) {
+        m_chartTypeCombo->blockSignals(true);
+        m_chartTypeCombo->setCurrentIndex(comboIndex);
+        m_chartTypeCombo->blockSignals(false);
+    }
+    
     m_chart->clearItems();
     m_chart->clearPlottables();
     
@@ -536,6 +663,39 @@ void ChartWidget::drawTimeIntervalChart(const TimeIntervalAnalysis& analysis)
     graph->setLineStyle(QCPGraph::lsLine);
     graph->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssCircle, QColor("#3498DB"), QColor("#FFFFFF"), 6));
     
+    // 为每个数据点添加数值标签
+    /* 当数据点过多时（超过30个），只显示部分标签避免重叠 */
+    int labelStep = 1;
+    if (analysis.intervals.size() > 30) {
+        labelStep = analysis.intervals.size() / 20;
+        if (labelStep < 1) labelStep = 1;
+    }
+    
+    QFont pointLabelFont("Microsoft YaHei", 8);
+    for (int i = 0; i < analysis.intervals.size(); i += labelStep) {
+        QCPItemText *pointLabel = new QCPItemText(m_chart);
+        pointLabel->setPositionAlignment(Qt::AlignHCenter | Qt::AlignBottom);
+        pointLabel->position->setType(QCPItemPosition::ptPlotCoords);
+        pointLabel->position->setCoords(keys[i], values[i]);
+        /* 标签显示在数据点上方 */
+        pointLabel->setText(QString("%1").arg(values[i], 0, 'f', 1));
+        pointLabel->setFont(pointLabelFont);
+        pointLabel->setColor(QColor("#2c3e50"));
+        pointLabel->setPadding(QMargins(2, 2, 2, 2));
+    }
+    /* 始终显示最后一个数据点的标签 */
+    if (analysis.intervals.size() > 1 && (analysis.intervals.size() - 1) % labelStep != 0) {
+        int lastIdx = analysis.intervals.size() - 1;
+        QCPItemText *pointLabel = new QCPItemText(m_chart);
+        pointLabel->setPositionAlignment(Qt::AlignHCenter | Qt::AlignBottom);
+        pointLabel->position->setType(QCPItemPosition::ptPlotCoords);
+        pointLabel->position->setCoords(keys[lastIdx], values[lastIdx]);
+        pointLabel->setText(QString("%1").arg(values[lastIdx], 0, 'f', 1));
+        pointLabel->setFont(pointLabelFont);
+        pointLabel->setColor(QColor("#2c3e50"));
+        pointLabel->setPadding(QMargins(2, 2, 2, 2));
+    }
+    
     // 添加平均线
     QCPGraph *avgLine = m_chart->addGraph();
     QVector<double> avgKeys, avgValues;
@@ -551,7 +711,8 @@ void ChartWidget::drawTimeIntervalChart(const TimeIntervalAnalysis& analysis)
     double minVal = analysis.minIntervalMs;
     double range = maxVal - minVal;
     if (range < 1) range = 1;
-    m_chart->yAxis->setRange(qMax(0.0, minVal - range * 0.1), maxVal + range * 0.1);
+    /* 上方留出更多空间给数据点标签 */
+    m_chart->yAxis->setRange(qMax(0.0, minVal - range * 0.1), maxVal + range * 0.25);
     
     m_chart->xAxis->setLabel(tr(u8"序号"));
     m_chart->yAxis->setLabel(tr(u8"时间间隔(ms)"));
@@ -946,7 +1107,38 @@ void ChartWidget::drawChsttPieChart()
     
     int margin = 20;
     int titleHeight = 40;
-    int legendWidth = 160;
+    
+    /* 先构建饼图数据，后续图例宽度计算和绘图都需要 */
+    QVector<int> pieValues;
+    QVector<QString> pieLabels;
+    QVector<QColor> pieColors;
+    
+    pieValues.append(successCount);
+    pieLabels.append(tr(u8"成功"));
+    pieColors.append(QColor("#2ECC71"));
+    
+    if (failCount > 0) {
+        pieValues.append(failCount);
+        pieLabels.append(tr(u8"失败"));
+        pieColors.append(QColor("#E74C3C"));
+    }
+    
+    /* 计算图例所需宽度，确保图例文字不被截断 */
+    QFont legendFontCalc2("Microsoft YaHei", 10);
+    QFontMetrics fmLegendCalc2(legendFontCalc2);
+    int maxLegendTextWidth2 = 0;
+    for (int i = 0; i < pieValues.size(); ++i) {
+        QString legendText = QString("%1: %2 (%3%)")
+            .arg(pieLabels[i])
+            .arg(pieValues[i])
+            .arg(pieValues[i] / static_cast<double>(total) * 100, 0, 'f', 1);
+        maxLegendTextWidth2 = qMax(maxLegendTextWidth2, fmLegendCalc2.boundingRect(legendText).width());
+    }
+    int legendWidth = qMax(160, 14 + 6 + maxLegendTextWidth2 + 20);
+    int availableWidth = chartWidth - margin * 2;
+    if (legendWidth > availableWidth * 0.45) {
+        legendWidth = static_cast<int>(availableWidth * 0.45);
+    }
     
     QFont titleFont("Microsoft YaHei", 14, QFont::Bold);
     painter.setFont(titleFont);
@@ -962,20 +1154,6 @@ void ChartWidget::drawChsttPieChart()
     int pieX = margin + (pieAreaWidth - pieDiameter) / 2;
     int pieY = margin + titleHeight + (pieAreaHeight - pieDiameter) / 2;
     QRectF pieRect(pieX, pieY, pieDiameter, pieDiameter);
-    
-    QVector<int> pieValues;
-    QVector<QString> pieLabels;
-    QVector<QColor> pieColors;
-    
-    pieValues.append(successCount);
-    pieLabels.append(tr(u8"成功"));
-    pieColors.append(QColor("#2ECC71"));
-    
-    if (failCount > 0) {
-        pieValues.append(failCount);
-        pieLabels.append(tr(u8"失败"));
-        pieColors.append(QColor("#E74C3C"));
-    }
     
     double startAngle = 90.0;
     
@@ -1033,7 +1211,16 @@ void ChartWidget::drawChsttPieChart()
         startAngle -= sliceAngle;
     }
     
+    /* 图例X坐标：饼图右侧 + 间距，但确保图例不超出控件右边界 */
     int legendX = pieX + pieDiameter + 20;
+    int legendRightEdge = legendX + legendWidth;
+    if (legendRightEdge > chartWidth - margin) {
+        /* 图例超出右边界时，向左调整图例起始位置 */
+        legendX = chartWidth - margin - legendWidth;
+        if (legendX < pieX + pieDiameter + 10) {
+            legendX = pieX + pieDiameter + 10;
+        }
+    }
     int legendY = pieY + 5;
     int legendItemHeight = 24;
     
@@ -1054,7 +1241,9 @@ void ChartWidget::drawChsttPieChart()
             .arg(pieValues[i] / static_cast<double>(total) * 100, 0, 'f', 1);
         
         painter.setPen(QColor("#34495e"));
-        QRectF textRect(legendX + 20, yPos, legendWidth - 30, legendItemHeight);
+        /* 图例文字区域宽度 = 控件宽度 - 图例起始X - 色块宽度 - 间距 - 右边距 */
+        int textWidth = chartWidth - legendX - 20 - margin;
+        QRectF textRect(legendX + 20, yPos, textWidth, legendItemHeight);
         painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, legendText);
     }
     

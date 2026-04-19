@@ -14,10 +14,35 @@
 #include "utils/Logger.h"
 #include <QFile>
 #include <QTextStream>
-#include <QDateTime>
 #include <QDebug>
 #include <algorithm>
 #include <cmath>
+
+/**
+ * @brief 将SMbiMonPacketData.timestamp（单位40微秒）转换为"时:分:秒.毫秒"格式字符串
+ * 
+ * 1553B原始时间戳为32位无符号整数，单位为40微秒。
+ * 转换公式：总毫秒数 = timestamp × 40 / 1000
+ * 然后将毫秒数分解为时、分、秒、毫秒。
+ * 
+ * @param rawTimestamp SMbiMonPacketData.timestamp，单位40微秒
+ * @return 格式化的时间字符串，如 "01:23:45.678"
+ */
+static QString formatRawTimestamp(quint32 rawTimestamp)
+{
+    /* 将40微秒单位的时间戳转换为总毫秒数 */
+    quint64 totalMs = static_cast<quint64>(rawTimestamp) * 40 / 1000;
+    int milliseconds = static_cast<int>(totalMs % 1000);
+    quint64 totalSeconds = totalMs / 1000;
+    int hours = static_cast<int>(totalSeconds / 3600);
+    int minutes = static_cast<int>((totalSeconds % 3600) / 60);
+    int seconds = static_cast<int>(totalSeconds % 60);
+    return QString("%1:%2:%3.%4")
+               .arg(hours, 2, 10, QChar('0'))
+               .arg(minutes, 2, 10, QChar('0'))
+               .arg(seconds, 2, 10, QChar('0'))
+               .arg(milliseconds, 3, 10, QChar('0'));
+}
 
 /**
  * @brief 分析指定RT和子地址的时间间隔
@@ -112,10 +137,12 @@ TimeIntervalAnalysis TimeIntervalAnalyzer::analyze(
                   return a.timestampMs < b.timestampMs;
               });
     
-    // 提取时间戳序列
+    // 提取时间戳序列，同时保存原始时间戳（SMbiMonPacketData.timestamp，单位40微秒）
     result.timestamps.reserve(result.recordCount);
+    result.rawTimestamps.reserve(result.recordCount);
     for (const DataRecord& record : filteredRecords) {
         result.timestamps.append(record.timestampMs);
+        result.rawTimestamps.append(record.packetData.timestamp);
     }
     
     // 计算时间间隔序列
@@ -172,7 +199,7 @@ TimeIntervalAnalysis TimeIntervalAnalyzer::analyze(
  * @brief 导出分析结果为CSV文件
  * 
  * CSV格式：
- * - 第一行：标题行（序号,时间戳(ms),时间间隔(ms)）
+ * - 第一行：标题行（序号,RT,子地址,数据包时间(时:分:秒.毫秒),与上一包间隔时间(单位：毫秒)）
  * - 后续行：数据行
  * 
  * 文件编码：UTF-8 with BOM
@@ -196,17 +223,23 @@ bool TimeIntervalAnalyzer::exportToCsv(
     out.setCodec("UTF-8");
     out.setGenerateByteOrderMark(true);  // 添加BOM以支持中文
     
-    // 写入标题行
-    out << QString::fromUtf8(u8"序号,时间戳(ms),时间间隔(ms)\n");
+    /* 写入标题行，包含序号、RT、子地址、数据包时间、间隔时间 */
+    out << QString::fromUtf8(u8"序号,RT,子地址,数据包时间(时:分:秒.毫秒),与上一包间隔时间(单位：毫秒)\n");
     
-    // 写入数据行
-    // 第一条记录没有时间间隔
-    out << QString("1,%1,\n").arg(analysis.timestamps[0], 0, 'f', 3);
+    /* 写入数据行 */
+    /* 数据包时间使用SMbiMonPacketData.timestamp（单位40微秒）转换为"时:分:秒.毫秒"格式 */
+    /* 第一条记录没有时间间隔，间隔时间列为空 */
+    out << QString("1,%1,%2,%3,\n")
+           .arg(analysis.terminalAddress)
+           .arg(analysis.subAddress)
+           .arg(formatRawTimestamp(analysis.rawTimestamps[0]));
     
     for (int i = 1; i < analysis.recordCount; ++i) {
-        out << QString("%1,%2,%3\n")
+        out << QString("%1,%2,%3,%4,%5\n")
                .arg(i + 1)
-               .arg(analysis.timestamps[i], 0, 'f', 3)
+               .arg(analysis.terminalAddress)
+               .arg(analysis.subAddress)
+               .arg(formatRawTimestamp(analysis.rawTimestamps[i]))
                .arg(analysis.intervals[i - 1], 0, 'f', 3);
     }
     

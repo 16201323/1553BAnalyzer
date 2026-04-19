@@ -271,6 +271,14 @@ private slots:
     void onExpressionFilterRequested(int column, const QString& expression);
     
     /**
+     * @brief 列筛选清除槽
+     * @param column 列索引
+     * 
+     * 清除指定列的算式筛选条件
+     */
+    void onColumnFilterCleared(int column);
+    
+    /**
      * @brief 解析计时器超时槽
      * 
      * 更新状态栏中的计时显示
@@ -349,6 +357,21 @@ private slots:
      * @param total 总记录数
      */
     void onFilterProgress(int percent, int processed, int total);
+    
+    /**
+     * @brief 筛选进度轮询槽
+     * 
+     * 由主线程定时器触发，轮询DataStore的原子进度变量并更新进度对话框。
+     * 使用轮询方式替代跨线程信号，确保在Qt 5.9.9下进度更新可靠。
+     */
+    void onFilterProgressPoll();
+    
+    /**
+     * @brief DataStore筛选条件变化槽
+     * 
+     * 当DataStore完成筛选操作后关闭进度对话框
+     */
+    void onDataStoreFilterChanged();
     
     /**
      * @brief 分页变化槽
@@ -529,6 +552,7 @@ private:
     QProgressDialog* m_reportProgressDialog; // 报告生成进度对话框
     
     ProgressDialog* m_progressDialog;    // 文件加载/筛选进度对话框
+    QTimer* m_filterPollTimer;           // 筛选进度轮询定时器（主线程定时器，轮询原子变量）
     LoadingDialog* m_loadingDialog;      // 图表加载提示对话框
     PaginationWidget* m_paginationWidget; // 分页控件
     QComboBox* m_dataScopeCombo;        // 数据范围选择框

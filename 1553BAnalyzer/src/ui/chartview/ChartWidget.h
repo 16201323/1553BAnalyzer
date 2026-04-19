@@ -6,12 +6,14 @@
  * - 饼图：展示数据分布比例
  * - 柱状图：展示数据量对比
  * - 折线图：展示数据趋势变化
+ * - 周期间隔折线图：展示指定RT和子地址的时间间隔变化趋势
  * 
  * 支持的统计主题：
  * - 消息类型分布：BC→RT、RT→BC、RT→RT、广播
  * - 终端数据量：各终端地址的数据条数
  * - 时间分布：按时间段统计数据量
  * - 通道状态：成功/失败比例
+ * - 周期间隔：指定RT和子地址的时间间隔分析
  * 
  * 使用示例：
  * @code
@@ -47,7 +49,8 @@ enum class ChartSubject {
     MessageType,    // 消息类型分布（BC→RT、RT→BC、RT→RT、广播）
     Terminal,       // 终端数据量（各终端地址的数据条数）
     Time,           // 时间分布（按时间段统计数据量）
-    Chstt           // 通道状态（成功/失败比例）
+    Chstt,          // 通道状态（成功/失败比例）
+    TimeInterval    // 周期间隔分析（指定RT和子地址的时间间隔）
 };
 
 /**
@@ -122,6 +125,14 @@ private slots:
      * 将当前图表导出为PNG图片
      */
     void onExportChart();
+    
+    /**
+     * @brief 导出时间间隔CSV槽
+     * 
+     * 将当前时间间隔分析结果导出为CSV文件，
+     * 包含序号、RT、子地址、数据包时间、间隔时间等列
+     */
+    void onExportTimeIntervalCsv();
 
 signals:
     /**
@@ -182,11 +193,14 @@ private:
     QCustomPlot* m_chart;           // QCustomPlot图表对象
     QComboBox* m_chartTypeCombo;    // 图表类型选择下拉框
     QPushButton* m_exportBtn;       // 导出按钮
+    QPushButton* m_exportCsvBtn;    // 导出CSV按钮（仅周期间隔折线图模式可见）
     ChartSubject m_chartSubject;    // 当前统计主题
     QString m_chartType;            // 当前图表类型
     QSize m_lastDrawSize;           // 上次绘制时的控件尺寸
     bool m_dataDirty;               // 数据已变更但图表未刷新标志
     QTimer* m_refreshTimer;         // 防抖刷新定时器
+    bool m_timeIntervalMode;        // 时间间隔分析模式标志，为true时refreshChart不覆盖当前图表
+    TimeIntervalAnalysis m_timeIntervalAnalysis; // 当前时间间隔分析结果，用于CSV导出
 };
 
 #endif

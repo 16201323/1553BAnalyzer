@@ -6,15 +6,12 @@
  * 
  * 主要功能：
  * - 数据展示：以表格形式显示1553B数据
- * - 右键菜单：复制、导出、筛选、查看详情
+ * - 右键菜单：复制、筛选、查看详情
  * - 行选择：支持单选和多选
  * - 双击查看：双击行显示数据详情
- * - 数据导出：支持CSV和Excel格式
  * 
  * 右键菜单项：
  * - 复制选中：复制选中单元格到剪贴板
- * - 导出CSV：导出选中数据为CSV格式
- * - 导出Excel：导出选中数据为Excel格式
  * - 按值筛选：根据选中单元格的值筛选数据
  * - 查看详情：打开数据详情对话框
  * 
@@ -74,12 +71,6 @@ public:
      * @param model 要设置的数据模型
      */
     void setModel(QAbstractItemModel* model) override;
-    
-    /**
-     * @brief 导出选中数据
-     * @param format 导出格式（"csv"或"excel"）
-     */
-    void exportSelection(const QString& format);
 
 signals:
     /**
@@ -106,6 +97,15 @@ signals:
      * @param expression 筛选表达式
      */
     void expressionFilterRequested(int column, const QString& expression);
+    
+    /**
+     * @brief 列筛选清除信号
+     * @param column 列索引
+     * 
+     * 当用户在筛选对话框中清空表达式时发出，
+     * 用于清除该列的算式筛选条件
+     */
+    void columnFilterCleared(int column);
 
 protected:
     /**
@@ -146,16 +146,6 @@ private slots:
     void onCopySelected();
     
     /**
-     * @brief 导出CSV槽函数
-     */
-    void onExportCSV();
-    
-    /**
-     * @brief 导出Excel槽函数
-     */
-    void onExportExcel();
-    
-    /**
      * @brief 按值筛选槽函数
      */
     void onFilterByValue();
@@ -185,8 +175,6 @@ private:
     bool m_autoResize;              // 是否自动调整列宽
     QMenu* m_contextMenu;           // 右键菜单
     QAction* m_actionCopy;          // 复制动作
-    QAction* m_actionExportCSV;     // 导出CSV动作
-    QAction* m_actionExportExcel;   // 导出Excel动作
     QAction* m_actionFilter;        // 筛选动作
     QAction* m_actionShowDetail;    // 显示详情动作
     int m_currentRow;               // 当前右键点击的行号

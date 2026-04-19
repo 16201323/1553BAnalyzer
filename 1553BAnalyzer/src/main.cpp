@@ -20,6 +20,7 @@
 #include <QIcon>
 #include <QPixmap>
 #include <QImage>
+#include <QTextCodec>
 #include "ui/mainwindow/MainWindow.h"
 #include "core/config/ConfigManager.h"
 #include "core/datastore/DatabaseManager.h"
@@ -80,6 +81,14 @@ void initLogger()
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
+    
+    /* 设置全局文本编码为UTF-8，防止中文乱码
+     * 在MSVC2015+Qt5.9.9环境下，系统默认编码为GBK(代码页936)，
+     * 而u8"..."字符串字面量产生UTF-8编码的字节序列，
+     * 设置codecForLocale为UTF-8后，QString(const char*)构造函数
+     * 会使用UTF-8解码，避免中文乱码。
+     * 注意：Qt5中setCodecForTr已被移除，tr()默认使用fromUtf8()解码 */
+    QTextCodec::setCodecForLocale(QTextCodec::codecForName("UTF-8"));
     
     /* 注册自定义元类型，使其可以跨线程传递 */
     qRegisterMetaType<SpeechConfig>("SpeechConfig");

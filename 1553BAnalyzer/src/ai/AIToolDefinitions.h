@@ -92,7 +92,7 @@ public:
         
         QJsonObject function;
         function["name"] = "query_data";
-        function["description"] = "查询1553B总线数据并显示在表格中。此工具会清除所有现有筛选条件并设置新的筛选条件。如果只想在现有筛选基础上增加条件，请使用add_filter工具。如果需要一次性设置多个筛选条件，请使用apply_filters_batch工具。";
+        function["description"] = u8"查询1553B总线数据并显示在表格中。此工具会清除所有现有筛选条件并设置新的筛选条件。如果只想在现有筛选基础上增加条件，请使用add_filter工具。如果需要一次性设置多个筛选条件，请使用apply_filters_batch工具。";
         
         QJsonObject parameters;
         parameters["type"] = "object";

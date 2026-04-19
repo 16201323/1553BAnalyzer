@@ -130,13 +130,14 @@ void AIQueryPanel::setupUI()
     m_resetDataBtn = new QPushButton(tr(u8"🔄 恢复原数据"), this);
     m_resetDataBtn->setStyleSheet("QPushButton { background-color: #3498db; color: white; border: none; padding: 5px 10px; border-radius: 3px; } QPushButton:hover { background-color: #2980b9; }");
     
-    /* 语音输入按钮：点击开始/停止录音 */
+    /* 语音输入按钮：点击开始/停止录音
+     * 初始状态为禁用，等待语音模型加载完成后由onSpeechInitDone启用 */
     m_voiceBtn = new QPushButton(tr(u8"🎤 语音"), this);
-    m_voiceBtn->setToolTip(tr(u8"点击开始语音输入，再次点击停止"));
+    m_voiceBtn->setToolTip(tr(u8"语音模型加载中，请稍候..."));
+    m_voiceBtn->setEnabled(false);
     m_voiceBtn->setStyleSheet(
-        "QPushButton { background-color: #3498db; color: white; border: none; "
+        "QPushButton { background-color: #95a5a6; color: white; border: none; "
         "padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
-        "QPushButton:hover { background-color: #2980b9; } "
         "QPushButton:disabled { background-color: #95a5a6; color: white; }"
     );
     m_voiceBtn->setCheckable(false);
@@ -220,7 +221,7 @@ void AIQueryPanel::setupAnalysisMode()
     layout->addWidget(new QLabel(tr(u8"输入自然语言指令:")));
     
     m_queryEdit = new QTextEdit(this);
-    m_queryEdit->setPlaceholderText(tr(u8"例如：\n• 显示终端地址为5的所有数据\n• 画一个饼图展示消息类型分布\n• 统计各终端的数据量\n• 生成甘特图"));
+    m_queryEdit->setPlaceholderText(tr(u8"例如：\n• 显示终端地址为26且子地址为3的周期间隔\n• 显示终端地址为5的所有数据\n• 画一个饼图展示消息类型分布\n• 统计各终端的数据量"));
     m_queryEdit->setMaximumHeight(100);
     layout->addWidget(m_queryEdit);
     
@@ -247,7 +248,7 @@ void AIQueryPanel::updatePlaceholder()
         m_chatInput->setPlaceholderText(tr(u8"输入消息与AI对话..."));
     } else {
         m_modeDescription->setText(tr(u8"📊 智能分析模式：用自然语言查询数据、生成图表和甘特图。AI会理解您的意图并执行相应操作。"));
-        m_queryEdit->setPlaceholderText(tr(u8"例如：\n• 显示终端地址为5的所有数据\n• 画一个饼图展示消息类型分布\n• 统计各终端的数据量\n• 生成甘特图"));
+        m_queryEdit->setPlaceholderText(tr(u8"例如：\n• 显示终端地址为26且子地址为3的周期间隔\n• 显示终端地址为5的所有数据\n• 画一个饼图展示消息类型分布\n• 统计各终端的数据量"));
     }
 }
 
@@ -392,6 +393,9 @@ QString AIQueryPanel::getQueryText() const
 /**
  * @brief 追加响应内容
  * @param response 要追加的响应文本
+ * 
+ * 分析模式下直接追加文本，QTextEdit::append()会自动添加段落分隔，
+ * 不需要额外添加换行符，避免出现多余空行。
  */
 void AIQueryPanel::appendResponse(const QString& response)
 {
@@ -400,8 +404,8 @@ void AIQueryPanel::appendResponse(const QString& response)
         addChatMessage(ChatMessage::Assistant, response);
     } else {
         // 分析模式：追加到响应区域
+        // QTextEdit::append()会自动添加段落分隔，不需要额外换行符
         m_responseEdit->append(response);
-        m_responseEdit->append("\n");
     }
 }
 
@@ -600,6 +604,15 @@ void AIQueryPanel::initSpeechRecognition()
     QMetaObject::invokeMethod(m_speechRecognizer, "doInitializeWithConfig", Qt::QueuedConnection,
         Q_ARG(SpeechConfig, speechCfg));
 
+    /* 模型加载期间禁用语音按钮，防止用户在模型未就绪时点击录音 */
+    m_voiceBtn->setEnabled(false);
+    m_voiceBtn->setText(tr(u8"🎤 语音"));
+    m_voiceBtn->setToolTip(tr(u8"语音模型加载中，请稍候..."));
+    m_voiceBtn->setStyleSheet(
+        "QPushButton { background-color: #95a5a6; color: white; border: none; "
+        "padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:disabled { background-color: #95a5a6; color: white; }"
+    );
     m_statusLabel->setText(tr(u8"语音：正在加载模型..."));
 }
 
@@ -618,6 +631,12 @@ void AIQueryPanel::onVoiceBtnClicked()
 
     if (!m_speechRecognizer) {
         QMessageBox::warning(this, tr(u8"语音输入"), tr(u8"语音识别引擎未初始化"));
+        return;
+    }
+
+    /* 语音模型未加载完成时，不允许点击开始录音 */
+    if (!m_speechInitialized) {
+        QMessageBox::warning(this, tr(u8"语音输入"), tr(u8"语音模型尚未加载完成，请稍候再试"));
         return;
     }
 

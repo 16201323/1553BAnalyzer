@@ -78,12 +78,12 @@
         
         <Provider id="qwen" name="千问">
             <Instance name="qwen-plus" enabled="true">
-                <ApiKey>YOUR_QWEN_API_KEY_HERE</ApiKey>
+                <ApiKey>sk-cff867681d5941ebab94f5d51f1c51e3</ApiKey>
                 <ApiUrl>https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation</ApiUrl>
                 <SystemPrompt>你是一个1553B总线数据分析专家，请根据用户的问题分析数据并给出专业的回答。</SystemPrompt>
             </Instance>
             <Instance name="qwen-max" enabled="true">
-                <ApiKey>YOUR_QWEN_API_KEY_HERE</ApiKey>
+                <ApiKey>sk-cff867681d5941ebab94f5d51f1c51e3</ApiKey>
                 <ApiUrl>https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation</ApiUrl>
                 <SystemPrompt>你是一个1553B总线数据分析专家，请根据用户的问题分析数据并给出专业的回答。</SystemPrompt>
             </Instance>
@@ -91,7 +91,7 @@
         
         <Provider id="deepseek" name="DeepSeek">
             <Instance name="deepseek-chat" enabled="true">
-                <ApiKey>YOUR_DEEPSEEK_API_KEY_HERE</ApiKey>
+                <ApiKey>sk-b2aaff0d27224b69ba51ab96d94a5cb9</ApiKey>
                 <ApiUrl>https://api.deepseek.com/v1/chat/completions</ApiUrl>
                 <SystemPrompt>你是一个1553B总线数据分析专家，请根据用户的问题分析数据并给出专业的回答。</SystemPrompt>
             </Instance>
@@ -99,7 +99,7 @@
         
         <Provider id="kimi" name="Kimi">
             <Instance name="moonshot-v1-8k" enabled="true">
-                <ApiKey>YOUR_KIMI_API_KEY_HERE</ApiKey>
+                <ApiKey>sk-uX6XV2rcBn3C8azHhJvhgHcdGAl2dkmRAaMdevCVJNkc9c47</ApiKey>
                 <ApiUrl>https://api.moonshot.cn/v1/chat/completions</ApiUrl>
                 <SystemPrompt>你是一个1553B总线数据分析专家，请根据用户的问题分析数据并给出专业的回答。</SystemPrompt>
             </Instance>

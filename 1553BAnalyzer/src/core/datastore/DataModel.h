@@ -155,6 +155,12 @@ public:
      */
     void refresh();
     
+    /**
+     * @brief 获取数据存储对象
+     * @return DataStore对象指针
+     */
+    DataStore* getDataStore() const { return m_dataStore; }
+    
 signals:
     /**
      * @brief 数据加载完成信号

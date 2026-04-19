@@ -13,11 +13,11 @@
  */
 
 #include "TableView.h"
+#include "core/datastore/DataModel.h"
+#include "core/datastore/DataStore.h"
 #include <QContextMenuEvent>
 #include <QClipboard>
 #include <QApplication>
-#include <QFileDialog>
-#include <QMessageBox>
 #include <QKeyEvent>
 #include <QInputDialog>
 
@@ -61,8 +61,6 @@ TableView::~TableView()
  * 创建右键菜单项：
  * - 数据详细：显示数据详情对话框
  * - 复制选中行：复制到剪贴板
- * - 导出为CSV：导出为CSV格式
- * - 导出为Excel：导出为Excel格式
  * - 按此值筛选：根据选中单元格筛选
  */
 void TableView::setupUI()
@@ -90,8 +88,6 @@ void TableView::setupUI()
     m_actionShowDetail = m_contextMenu->addAction(tr(u8"数据详细"));
     m_contextMenu->addSeparator();
     m_actionCopy = m_contextMenu->addAction(tr(u8"复制选中行"));
-    m_actionExportCSV = m_contextMenu->addAction(tr(u8"导出为CSV"));
-    m_actionExportExcel = m_contextMenu->addAction(tr(u8"导出为Excel"));
     m_contextMenu->addSeparator();
     m_actionFilter = m_contextMenu->addAction(tr(u8"按此值筛选"));
 }
@@ -132,8 +128,6 @@ void TableView::setupConnections()
     });
     
     connect(m_actionCopy, &QAction::triggered, this, &TableView::onCopySelected);
-    connect(m_actionExportCSV, &QAction::triggered, this, &TableView::onExportCSV);
-    connect(m_actionExportExcel, &QAction::triggered, this, &TableView::onExportExcel);
     connect(m_actionFilter, &QAction::triggered, this, &TableView::onFilterByValue);
     connect(m_actionShowDetail, &QAction::triggered, this, &TableView::onShowDetail);
 }
@@ -149,26 +143,6 @@ void TableView::setAutoResizeColumns(bool enabled)
     m_autoResize = enabled;
     if (enabled && model()) {
         resizeColumnsToContents();
-    }
-}
-
-/**
- * @brief 导出选中数据
- * @param format 导出格式（"csv"或"xlsx"）
- * 
- * 打开文件保存对话框，导出选中的数据
- */
-void TableView::exportSelection(const QString& format)
-{
-    QString filePath = QFileDialog::getSaveFileName(
-        this,
-        tr(u8"导出数据"),
-        QString(),
-        format == "csv" ? tr(u8"CSV文件 (*.csv)") : tr(u8"Excel文件 (*.xlsx)")
-    );
-    
-    if (!filePath.isEmpty()) {
-        QMessageBox::information(this, tr(u8"导出"), tr(u8"导出功能开发中..."));
     }
 }
 
@@ -245,25 +219,11 @@ void TableView::onCopySelected()
 }
 
 /**
- * @brief 导出CSV槽函数
- */
-void TableView::onExportCSV()
-{
-    exportSelection("csv");
-}
-
-/**
- * @brief 导出Excel槽函数
- */
-void TableView::onExportExcel()
-{
-    exportSelection("xlsx");
-}
-
-/**
  * @brief 按值筛选槽函数
  * 
- * 弹出输入对话框，让用户输入算式筛选条件
+ * 弹出输入对话框，让用户输入算式筛选条件。
+ * 如果该列已有筛选条件，会在输入框中预填已有的筛选表达式，
+ * 方便用户查看和修改当前筛选条件。
  */
 void TableView::onFilterByValue()
 {
@@ -275,11 +235,21 @@ void TableView::onFilterByValue()
     int column = index.column();
     QVariant value = model()->data(index);
     
-    // 构建提示信息
+    /* 构建提示信息 */
     QString columnName = model()->headerData(column, Qt::Horizontal).toString();
     QString currentValue = value.toString();
     
-    // 弹出输入对话框
+    /* 获取该列已有的筛选表达式，用于预填到输入框 */
+    QString existingExpression;
+    DataModel* dataModel = qobject_cast<DataModel*>(model());
+    if (dataModel) {
+        DataStore* dataStore = dataModel->getDataStore();
+        if (dataStore) {
+            existingExpression = dataStore->getColumnExpressionFilter(column);
+        }
+    }
+    
+    /* 弹出输入对话框，预填已有筛选表达式 */
     bool ok;
     QString expression = QInputDialog::getText(
         this,
@@ -295,13 +265,18 @@ void TableView::onFilterByValue()
            u8"  <3||>10     小于3或大于10\n"
            u8"  >1;<10      大于1或小于10").arg(currentValue),
         QLineEdit::Normal,
-        QString(),
+        existingExpression,
         &ok
     );
     
-    if (ok && !expression.isEmpty()) {
-        // 发出算式筛选请求信号
-        emit expressionFilterRequested(column, expression);
+    if (ok) {
+        if (!expression.isEmpty()) {
+            /* 发出算式筛选请求信号 */
+            emit expressionFilterRequested(column, expression);
+        } else if (!existingExpression.isEmpty()) {
+            /* 用户清空了表达式，发出清除该列筛选的信号 */
+            emit columnFilterCleared(column);
+        }
     }
 }
 
