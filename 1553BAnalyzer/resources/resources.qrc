@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>config/config.xml</file>
+        <file>icons/pandas.png</file>
+    </qresource>
+</RCC>
