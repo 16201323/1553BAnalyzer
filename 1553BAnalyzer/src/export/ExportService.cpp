@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file ExportService.cpp
  * @brief 数据导出服务实现
  *
@@ -22,31 +22,70 @@
 
 #include "ExportService.h"
 #include "core/parser/PacketStruct.h"
+#include "core/config/ConfigManager.h"
 #include <QFile>
 #include <QTextStream>
 #include <QPrinter>
 #include <QTextDocument>
 #include <QTableWidget>
+#include <QDataStream>
 #include <QDebug>
 #include "utils/Qt5Compat.h"
 #include <cstring>
 
 /**
- * @brief 将时间戳转换为时分秒毫秒格式
- * @param timestamp 时间戳（毫秒）
- * @return 格式化的时间字符串，格式为 HH:MM:SS.mmm
+ * @brief 将时间戳转换为时分秒毫秒[纳秒]格式
+ * @param timestamp 时间戳（单位40微秒）
+ * @return 格式化的时间字符串，格式为 HH:MM:SS.mmm[ns]
+ *
+ * 时间戳单位说明：
+ * - 时间戳原始单位为40微秒（即每个计数值代表40000纳秒）
+ * - 转换：总纳秒 = timestamp * 40000
+ * - 例：timestamp=90000 → 总纳秒=3600000000 → "00:00:03.600[000000]"
  */
 QString formatTimestamp(quint32 timestamp)
 {
-    int totalSeconds = timestamp / 1000;
-    int milliseconds = timestamp % 1000;
-    int hours = totalSeconds / 3600;
-    int minutes = (totalSeconds % 3600) / 60;
-    int seconds = totalSeconds % 60;
-    return QString("%1:%2:%3.%4").arg(hours, 2, 10, QChar('0'))
-                                .arg(minutes, 2, 10, QChar('0'))
-                                .arg(seconds, 2, 10, QChar('0'))
-                                .arg(milliseconds, 3, 10, QChar('0'));
+    // 时间戳单位40微秒，转换为纳秒：timestamp * 40000
+    quint64 totalNs = static_cast<quint64>(timestamp) * 40000ULL;
+    quint64 totalMs = totalNs / 1000000ULL;
+    int hours = static_cast<int>(totalMs / 3600000);
+    int minutes = static_cast<int>((totalMs % 3600000) / 60000);
+    int seconds = static_cast<int>((totalMs % 60000) / 1000);
+    int milliseconds = static_cast<int>(totalMs % 1000);
+    // 剩余纳秒 = 总纳秒超出毫秒的部分
+    quint64 remainingNs = totalNs - totalMs * 1000000ULL;
+    return QString("%1:%2:%3.%4[%5]").arg(hours, 2, 10, QChar('0'))
+                                     .arg(minutes, 2, 10, QChar('0'))
+                                     .arg(seconds, 2, 10, QChar('0'))
+                                     .arg(milliseconds, 3, 10, QChar('0'))
+                                     .arg(remainingNs, 6, 10, QChar('0'));
+}
+
+/**
+ * @brief 将QByteArray转换为每2字节一组的十六进制字符串（大端序显示）
+ * @param data 原始字节数据
+ * @return 十六进制字符串，每2字节后跟一个空格，如 "A5A5 A501 0032"
+ *
+ * 使用手动nibble查表法，确保值为0x00的字节也能正确显示为"00"
+ */
+static QString toHexBE2(const QByteArray& data)
+{
+    if (data.isEmpty()) return QString();
+    static const char hexChars[] = "0123456789ABCDEF";
+    QString result;
+    result.reserve(data.size() * 3);
+    for (int i = 0; i < data.size(); i += 2) {
+        if (i > 0) result += ' ';
+        quint8 hi = static_cast<quint8>(data[i]);
+        result += QChar(hexChars[hi >> 4]);
+        result += QChar(hexChars[hi & 0x0F]);
+        if (i + 1 < data.size()) {
+            quint8 lo = static_cast<quint8>(data[i + 1]);
+            result += QChar(hexChars[lo >> 4]);
+            result += QChar(hexChars[lo & 0x0F]);
+        }
+    }
+    return result.toUpper();
 }
 
 ExportService::ExportService(QObject *parent)
@@ -84,12 +123,44 @@ bool ExportService::exportToCsv(const QString& filePath, DataStore* store, DataS
     QT5COMPAT_SET_UTF8(out);
     out.setGenerateByteOrderMark(true);
     
-    // 使用UTF-8编码的标题行
-    out << QString::fromUtf8(u8"包头1,包头2,MPU标识,包长度,年,月,日,头时间,")
-        << QString::fromUtf8(u8"块头,CMD1,终端地址1,T_R1,子地址1,计数/码1,")
-        << QString::fromUtf8(u8"CMD2,终端地址2,T_R2,子地址2,计数/码2,")
-        << QString::fromUtf8(u8"状态1,状态2,结果,块时间,")
-        << QString::fromUtf8(u8"数据,数据包,完整数据\n");
+    // CSV文本单元格包装器：将所有单元格格式化为="值"，
+    // 强制Excel将单元格识别为文本模式，防止前导0被隐藏或数字被科学计数法表示
+    auto csvText = [](const QString& val) -> QString {
+        QString escaped = val;
+        escaped.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+        return QStringLiteral("=\"%1\"").arg(escaped);
+    };
+    
+    // CSV表头行：每个列标题包裹为="标题"，强制Excel以文本模式显示
+    out << csvText(QString::fromUtf8(u8"包头1")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"包头2")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"MPU标识")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"包长度")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"年")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"月")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"日")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"头时间")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"块头")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"CMD1")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"终端地址1")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"T_R1")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"子地址1")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"计数/码1")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"CMD2")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"终端地址2")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"T_R2")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"子地址2")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"计数/码2")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"状态1")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"状态2")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"结果")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"块时间")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"数据")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"数据块")) << QLatin1Char(',')
+        << csvText(QString::fromUtf8(u8"数据包")) << QLatin1Char('\n');
+    
+    // 获取字节序设置，用于hex显示
+    bool isLittleEndian = (ConfigManager::instance()->getParserConfig().byteOrder == "little");
     
     QVector<DataRecord> records = store->getRecordsByScope(scope);
     int total = records.size();
@@ -103,62 +174,114 @@ bool ExportService::exportToCsv(const QString& filePath, DataStore* store, DataS
         CMD cmd2;
         memcpy(&cmd2, &record.packetData.cmd2, sizeof(CMD));
         
-        out << QString("0X%1,").arg(record.packetHeader.header1, 4, 16, QChar('0')).toUpper();
-        out << QString("0X%1,").arg(record.packetHeader.header2, 2, 16, QChar('0')).toUpper();
-        out << QString("%1,").arg(record.packetHeader.mpuProduceId);
-        out << QString("%1,").arg(record.packetHeader.packetLen);
-        out << QString("%1,").arg(record.packetHeader.year);
-        out << QString("%1,").arg(record.packetHeader.month);
-        out << QString("%1,").arg(record.packetHeader.day);
-        out << QString("%1,").arg(formatTimestamp(record.packetHeader.timestamp));
+        // 所有单元格输出均使用csvText()包裹为="值"格式，强制Excel识别为文本
+        out << csvText(QString("0X%1").arg(record.packetHeader.header1, 4, 16, QChar('0')).toUpper()) << QLatin1Char(',');
+        out << csvText(QString("0X%1").arg(record.packetHeader.header2, 2, 16, QChar('0')).toUpper()) << QLatin1Char(',');
+        out << csvText(QString::number(record.packetHeader.mpuProduceId)) << QLatin1Char(',');
+        out << csvText(QString::number(record.packetHeader.packetLen)) << QLatin1Char(',');
+        out << csvText(QString::number(record.packetHeader.year)) << QLatin1Char(',');
+        out << csvText(QString::number(record.packetHeader.month)) << QLatin1Char(',');
+        out << csvText(QString::number(record.packetHeader.day)) << QLatin1Char(',');
+        out << csvText(formatTimestamp(record.packetHeader.timestamp)) << QLatin1Char(',');
         
-        out << QString("0X%1,").arg(record.packetData.header, 4, 16, QChar('0')).toUpper();
-        out << QString("0X%1,").arg(record.packetData.cmd1, 4, 16, QChar('0')).toUpper();
-        out << QString("%1,").arg(cmd1.zhongduandizhi);
-        out << QString("%1,").arg(cmd1.T_R ? u8"RT→BC" : u8"BC→RT");
-        out << QString("%1,").arg(cmd1.zidizhi);
-        out << QString("%1,").arg(cmd1.sjzjs_fsdm);
+        out << csvText(QString("0X%1").arg(record.packetData.header, 4, 16, QChar('0')).toUpper()) << QLatin1Char(',');
+        out << csvText(QString("0X%1").arg(record.packetData.cmd1, 4, 16, QChar('0')).toUpper()) << QLatin1Char(',');
+        out << csvText(QString::number(cmd1.zhongduandizhi)) << QLatin1Char(',');
+        out << csvText(cmd1.T_R ? QString::fromUtf8(u8"RT→BC") : QString::fromUtf8(u8"BC→RT")) << QLatin1Char(',');
+        out << csvText(QString::number(cmd1.zidizhi)) << QLatin1Char(',');
+        out << csvText(QString::number(cmd1.sjzjs_fsdm)) << QLatin1Char(',');
         
-        out << QString("0X%1,").arg(record.packetData.cmd2, 4, 16, QChar('0')).toUpper();
-        out << QString("%1,").arg(cmd2.zhongduandizhi);
-        out << QString("%1,").arg(cmd2.T_R ? u8"RT→BC" : u8"BC→RT");
-        out << QString("%1,").arg(cmd2.zidizhi);
-        out << QString("%1,").arg(cmd2.sjzjs_fsdm);
+        out << csvText(QString("0X%1").arg(record.packetData.cmd2, 4, 16, QChar('0')).toUpper()) << QLatin1Char(',');
+        out << csvText(QString::number(cmd2.zhongduandizhi)) << QLatin1Char(',');
+        out << csvText(cmd2.T_R ? QString::fromUtf8(u8"RT→BC") : QString::fromUtf8(u8"BC→RT")) << QLatin1Char(',');
+        out << csvText(QString::number(cmd2.zidizhi)) << QLatin1Char(',');
+        out << csvText(QString::number(cmd2.sjzjs_fsdm)) << QLatin1Char(',');
         
-        out << QString("0X%1,").arg(record.packetData.states1, 4, 16, QChar('0')).toUpper();
-        out << QString("0X%1,").arg(record.packetData.states2, 4, 16, QChar('0')).toUpper();
-        out << QString("%1,").arg(record.packetData.chstt ? u8"成功" : u8"失败");
-        out << QString("%1,").arg(formatTimestamp(record.packetData.timestamp));
+        out << csvText(QString("0X%1").arg(record.packetData.states1, 4, 16, QChar('0')).toUpper()) << QLatin1Char(',');
+        out << csvText(QString("0X%1").arg(record.packetData.states2, 4, 16, QChar('0')).toUpper()) << QLatin1Char(',');
+        out << csvText(record.packetData.chstt ? QString::fromUtf8(u8"成功") : QString::fromUtf8(u8"失败")) << QLatin1Char(',');
+        out << csvText(formatTimestamp(record.packetData.timestamp)) << QLatin1Char(',');
         
-        QString dataHex = record.packetData.datas.toHex(' ').toUpper();
-        QStringList dataBytes = dataHex.split(' ');
-        QString dataWith0X;
-        for (int j = 0; j < dataBytes.size(); ++j) {
-            const QString& byte = dataBytes[j];
-            if (!dataWith0X.isEmpty()) dataWith0X += " ";
-            if (j == 0 && !byte.isEmpty()) {
-                dataWith0X += "0X" + byte;
+        QString dataHex = toHexBE2(record.packetData.datas);
+        out << csvText(dataHex) << QLatin1Char(',');
+        
+        // 构建数据块hex：按设置的字节序排列每个多字节字段
+        QByteArray blockRaw;
+        // helper：按字节序添加quint16
+        auto appendU16 = [&](QByteArray& arr, quint16 v) {
+            if (isLittleEndian) {
+                arr.append(static_cast<char>(v & 0xFF));
+                arr.append(static_cast<char>((v >> 8) & 0xFF));
             } else {
-                dataWith0X += byte;
+                arr.append(static_cast<char>((v >> 8) & 0xFF));
+                arr.append(static_cast<char>(v & 0xFF));
             }
+        };
+        // helper：按字节序添加quint32
+        auto appendU32 = [&](QByteArray& arr, quint32 v) {
+            if (isLittleEndian) {
+                arr.append(static_cast<char>(v & 0xFF));
+                arr.append(static_cast<char>((v >> 8) & 0xFF));
+                arr.append(static_cast<char>((v >> 16) & 0xFF));
+                arr.append(static_cast<char>((v >> 24) & 0xFF));
+            } else {
+                arr.append(static_cast<char>((v >> 24) & 0xFF));
+                arr.append(static_cast<char>((v >> 16) & 0xFF));
+                arr.append(static_cast<char>((v >> 8) & 0xFF));
+                arr.append(static_cast<char>(v & 0xFF));
+            }
+        };
+        appendU16(blockRaw, record.packetData.header);
+        appendU16(blockRaw, record.packetData.cmd1);
+        appendU16(blockRaw, record.packetData.cmd2);
+        appendU16(blockRaw, record.packetData.states1);
+        appendU16(blockRaw, record.packetData.states2);
+        appendU16(blockRaw, record.packetData.chstt);
+        appendU32(blockRaw, record.packetData.timestamp);
+        blockRaw.append(record.packetData.datas);
+        out << csvText(toHexBE2(blockRaw)) << QLatin1Char(',');
+        
+        // =====================================================================
+        // 构建数据包hex：完全复刻数据详细弹框"源码"标签页的构造逻辑
+        //   1) 通过store->getMessage()获取完整消息
+        //   2) 用QDataStream BigEndian构造包头字节数组
+        //   3) 遍历消息中所有数据块，用QDataStream BigEndian构造数据块字节数组
+        //   4) 拼接包头+所有数据块 = 整包源码
+        //   5) toHexBE2()格式化（每2字节空格，与formatHexWithSpace效果相同）
+        const PacketParser::SMbiMonPacketMsg& msg = store->getMessage(record.msgIndex);
+        const PacketParser::SMbiMonPacketHeader& hdr = msg.header;
+        
+        // 构建包头源码（14字节，大端序），与MainWindow.cpp源码标签页完全一致
+        QByteArray headerSource;
+        QDataStream headerStream(&headerSource, QIODevice::WriteOnly);
+        headerStream.setByteOrder(QDataStream::BigEndian);
+        headerStream << hdr.header1;
+        headerStream << hdr.header2;
+        headerStream << hdr.mpuProduceId;
+        headerStream << hdr.packetLen;
+        headerStream << hdr.year;
+        headerStream << hdr.month;
+        headerStream << hdr.day;
+        headerStream << hdr.timestamp;
+        
+        // 构建所有数据块源码（大端序），遍历消息中全部数据块
+        QByteArray allDataSource;
+        for (const auto& pkt : msg.packetDatas) {
+            QDataStream dataStream(&allDataSource, QIODevice::WriteOnly | QIODevice::Append);
+            dataStream.setByteOrder(QDataStream::BigEndian);
+            dataStream << pkt.header;
+            dataStream << pkt.cmd1;
+            dataStream << pkt.cmd2;
+            dataStream << pkt.states1;
+            dataStream << pkt.states2;
+            dataStream << pkt.chstt;
+            dataStream << pkt.timestamp;
+            dataStream.writeRawData(pkt.datas.constData(), pkt.datas.size());
         }
-        out << QString("\"%1\",").arg(dataWith0X);
         
-        QByteArray packetRaw;
-        packetRaw.append(reinterpret_cast<const char*>(&record.packetData.header), sizeof(record.packetData.header));
-        packetRaw.append(reinterpret_cast<const char*>(&record.packetData.cmd1), sizeof(record.packetData.cmd1));
-        packetRaw.append(reinterpret_cast<const char*>(&record.packetData.cmd2), sizeof(record.packetData.cmd2));
-        packetRaw.append(reinterpret_cast<const char*>(&record.packetData.states1), sizeof(record.packetData.states1));
-        packetRaw.append(reinterpret_cast<const char*>(&record.packetData.states2), sizeof(record.packetData.states2));
-        packetRaw.append(reinterpret_cast<const char*>(&record.packetData.chstt), sizeof(record.packetData.chstt));
-        packetRaw.append(reinterpret_cast<const char*>(&record.packetData.timestamp), sizeof(record.packetData.timestamp));
-        packetRaw.append(record.packetData.datas);
-        out << QString("\"%1\",").arg(QString(packetRaw.toHex(' ')).toUpper());
-        
-        QByteArray fullRaw;
-        fullRaw.append(reinterpret_cast<const char*>(&record.packetHeader), sizeof(record.packetHeader));
-        fullRaw.append(packetRaw);
-        out << QString("\"%1\"\n").arg(QString(fullRaw.toHex(' ')).toUpper());
+        // 拼接包头+所有数据块，与源码标签页的 fullSource = headerSource + allDataSource 一致
+        QByteArray fullSource = headerSource + allDataSource;
+        out << csvText(toHexBE2(fullSource)) << QLatin1Char('\n');
         
         if (i % 100 == 0) {
             emit exportProgress(i, total);
