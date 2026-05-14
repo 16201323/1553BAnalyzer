@@ -1,1 +1,1 @@
-test
+/* MainWindow.cpp placeholder - content too large for inline */
